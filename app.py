@@ -468,6 +468,8 @@ async def save_api_settings(
     API設定を保存
     Geminiモデル名は指定されない場合はデフォルト値を使用
     フォームから送信された値が空の場合は、既存の値を保持する
+    
+    注意: Vercel環境では環境変数はダッシュボードから設定する必要があります
     """
     global settings
     # 設定が読み込まれていない場合は読み込む
@@ -476,6 +478,22 @@ async def save_api_settings(
     
     import os
     from pathlib import Path
+    
+    # Vercel環境を検出（VERCEL環境変数が存在するか、/tmpディレクトリが存在するか）
+    is_vercel = (
+        os.environ.get("VERCEL") == "1" or 
+        os.environ.get("VERCEL_ENV") is not None or
+        Path("/tmp").exists() and not Path(".env").exists()  # Vercelでは/tmpは存在するが.envは書き込めない
+    )
+    
+    # Vercel環境では.envファイルへの書き込みはできない
+    if is_vercel:
+        logger.warning("Vercel環境では.envファイルへの書き込みはできません。環境変数はVercelダッシュボードから設定してください。")
+        return JSONResponse({
+            "success": False,
+            "message": "Vercel環境では環境変数の保存はできません。環境変数はVercelダッシュボード（Settings > Environment Variables）から設定してください。",
+            "vercel_instructions": True
+        }, status_code=400)
     
     try:
         env_file = Path(".env")
@@ -585,9 +603,23 @@ async def save_api_settings(
         
         logger.debug(f"更新された設定キー: {updated_keys}")
         
-        # .envファイルに書き込む
-        with open(env_file, "w", encoding="utf-8") as f:
-            f.writelines(new_lines)
+        # .envファイルに書き込む（Vercel環境では書き込めない場合がある）
+        try:
+            with open(env_file, "w", encoding="utf-8") as f:
+                f.writelines(new_lines)
+        except OSError as e:
+            # Vercel環境ではファイルシステムが読み取り専用の場合がある（エラーコード30）
+            import errno
+            if e.errno == errno.EROFS or "Read-only file system" in str(e) or "[Errno 30]" in str(e):
+                logger.warning("Vercel環境では.envファイルへの書き込みはできません。環境変数はVercelダッシュボードから設定してください。")
+                return JSONResponse({
+                    "success": False,
+                    "message": "Vercel環境では環境変数の保存はできません。環境変数はVercelダッシュボード（Settings > Environment Variables）から設定してください。",
+                    "vercel_instructions": True
+                }, status_code=400)
+            else:
+                # その他のI/Oエラー
+                raise
         
         # 保存する設定の詳細をログに記録（デバッグ用）
         logger.info(f"設定を保存しました: {list(new_settings.keys())}")

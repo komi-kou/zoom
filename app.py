@@ -1732,12 +1732,94 @@ async def get_auto_process_mappings():
 @app.get("/api/webhook/zoom")
 async def zoom_webhook_get():
     """Webhookエンドポイントの動作確認用（GET）"""
+    global settings
+    
+    # 設定の状態を確認
+    config_status = {
+        "settings_exists": settings is not None,
+        "zoom_api_secret_exists": False,
+        "zoom_api_secret_length": 0
+    }
+    
+    if settings:
+        try:
+            config_status["zoom_api_secret_exists"] = bool(settings.zoom_api_secret)
+            if settings.zoom_api_secret:
+                config_status["zoom_api_secret_length"] = len(settings.zoom_api_secret)
+        except Exception as e:
+            logger.error(f"設定の確認中にエラー: {e}")
+    
     return JSONResponse({
         "status": "ok",
         "message": "Zoom Webhookエンドポイントは正常に動作しています",
         "endpoint": "/api/webhook/zoom",
-        "method": "POST"
+        "method": "POST",
+        "config_status": config_status,
+        "note": "Challenge-response検証にはZOOM_API_SECRETが必要です"
     })
+
+
+@app.post("/api/webhook/zoom/test")
+async def zoom_webhook_test(request: Request):
+    """Challenge-response検証のテスト用エンドポイント"""
+    global settings
+    
+    try:
+        # テスト用のリクエストデータ
+        test_data = {
+            "event": "endpoint.url_validation",
+            "payload": {
+                "plainToken": "test_token_for_validation"
+            }
+        }
+        
+        # 設定の状態を確認
+        if not settings:
+            try:
+                reload_settings()
+            except Exception as e:
+                return JSONResponse({
+                    "success": False,
+                    "error": f"設定の読み込みに失敗: {str(e)}"
+                }, status_code=500)
+        
+        if not settings or not settings.zoom_api_secret:
+            return JSONResponse({
+                "success": False,
+                "error": "ZOOM_API_SECRETが設定されていません",
+                "config_status": {
+                    "settings_exists": settings is not None,
+                    "zoom_api_secret_exists": False
+                }
+            }, status_code=500)
+        
+        # Challenge-response検証を実行
+        import hmac
+        import hashlib
+        
+        plain_token = test_data["payload"]["plainToken"]
+        encrypted_token = hmac.new(
+            settings.zoom_api_secret.encode('utf-8'),
+            plain_token.encode('utf-8'),
+            hashlib.sha256
+        ).hexdigest()
+        
+        return JSONResponse({
+            "success": True,
+            "message": "Challenge-response検証が正常に動作しています",
+            "test_result": {
+                "plainToken": plain_token,
+                "encryptedToken": encrypted_token,
+                "zoom_api_secret_length": len(settings.zoom_api_secret)
+            }
+        })
+        
+    except Exception as e:
+        logger.error(f"テストエンドポイントでエラー: {e}", exc_info=True)
+        return JSONResponse({
+            "success": False,
+            "error": str(e)
+        }, status_code=500)
 
 
 @app.post("/api/webhook/zoom")

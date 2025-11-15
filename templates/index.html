@@ -1,0 +1,367 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Zoom議事録自動生成ツール</title>
+    <link rel="stylesheet" href="/static/css/style.css">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+JP:wght@300;400;500;700&display=swap" rel="stylesheet">
+</head>
+<body>
+    <div class="container">
+        <header class="header">
+            <h1 class="title">
+                <span class="icon">📝</span>
+                Zoom議事録自動生成ツール
+            </h1>
+            <p class="subtitle">Zoomの録画から自動で議事録を作成し、Chatworkに送信します</p>
+        </header>
+
+        <main class="main-content">
+            <!-- API設定セクション -->
+            <section class="api-settings-section">
+                <h2 class="section-title">⚙️ API設定</h2>
+                <p class="section-description">
+                    各APIの認証情報を設定してください。各設定グループの「接続テスト」ボタンで設定を確認できます。<br>
+                    設定を保存すると、自動的に接続テストが実行されます。
+                </p>
+                
+                <form id="api-settings-form" class="api-settings-form">
+                    <!-- Zoom API設定 -->
+                    <div class="api-setting-group">
+                        <div class="api-setting-header">
+                            <h3 class="api-setting-title">🎥 Zoom API設定</h3>
+                            <button type="button" class="btn btn-test-small" id="zoom-test-btn" data-api="zoom">
+                                🔍 接続テスト
+                            </button>
+                        </div>
+                        <p class="api-setting-description">
+                            Zoomの録画を取得するために必要な設定です。<br>
+                            <a href="https://marketplace.zoom.us/" target="_blank" style="color: #059669; text-decoration: underline;">Zoom Marketplace</a>でアプリを作成して認証情報を取得してください。
+                        </p>
+                        <div class="form-group">
+                            <label for="zoom-api-key" class="form-label">
+                                <span class="required-mark">必須</span> API Key（Client ID）
+                            </label>
+                            <input 
+                                type="password" 
+                                id="zoom-api-key" 
+                                name="zoom_api_key" 
+                                class="form-input" 
+                                placeholder="Zoom API Key（Client ID）を入力"
+                            >
+                            <small class="form-help">
+                                <strong>重要:</strong> Zoom Marketplaceの「App Credentials」セクションにある「Client ID」を入力してください。<br>
+                                Zoom Marketplace → Develop → Build App → アプリを選択 → 「App Credentials」タブ
+                            </small>
+                        </div>
+                        <div class="form-group">
+                            <label for="zoom-api-secret" class="form-label">
+                                <span class="required-mark">必須</span> API Secret（Client Secret）
+                            </label>
+                            <input 
+                                type="password" 
+                                id="zoom-api-secret" 
+                                name="zoom_api_secret" 
+                                class="form-input" 
+                                placeholder="Zoom API Secret（Client Secret）を入力"
+                            >
+                            <small class="form-help">
+                                <strong>重要:</strong> Zoom Marketplaceの「App Credentials」セクションにある「Client Secret」を入力してください。<br>
+                                「Show」ボタンをクリックして表示された値をコピーしてください。
+                            </small>
+                        </div>
+                        <div class="form-group">
+                            <label for="zoom-account-id" class="form-label">
+                                <span class="required-mark">必須</span> Account ID
+                            </label>
+                            <input 
+                                type="text" 
+                                id="zoom-account-id" 
+                                name="zoom_account_id" 
+                                class="form-input" 
+                                placeholder="例: FxL2TITwTpaE3BDkOBsqRQ"
+                            >
+                            <small class="form-help">
+                                <strong>重要:</strong> Server-to-Server OAuthを使用する場合は必須です。<br>
+                                Zoom Marketplace → アプリの「App Credentials」セクションの「Account ID」をコピーしてください。<br>
+                                <strong style="color: #DC2626;">⚠️ スコープ設定:</strong> アプリの「Scopes」タブで以下のスコープを有効にしてください:<br>
+                                • <code>meeting:read:admin</code>（録画取得に必要）<br>
+                                • <code>account:read:admin</code>（アカウント情報取得に必要）
+                            </small>
+                        </div>
+                    </div>
+
+                    <!-- Gemini API設定 -->
+                    <div class="api-setting-group">
+                        <div class="api-setting-header">
+                            <h3 class="api-setting-title">🤖 Gemini API設定</h3>
+                            <button type="button" class="btn btn-test-small" id="gemini-test-btn" data-api="gemini">
+                                🔍 接続テスト
+                            </button>
+                        </div>
+                        <p class="api-setting-description">
+                            録画から議事録を生成するために必要な設定です。<br>
+                            <a href="https://makersuite.google.com/app/apikey" target="_blank" style="color: #D97706; text-decoration: underline;">Google AI Studio</a>でAPI Keyを取得してください。
+                        </p>
+                        <div class="form-group">
+                            <label for="gemini-api-key" class="form-label">
+                                <span class="required-mark">必須</span> API Key
+                            </label>
+                            <input 
+                                type="password" 
+                                id="gemini-api-key" 
+                                name="gemini_api_key" 
+                                class="form-input" 
+                                placeholder="Gemini API Keyを入力"
+                            >
+                            <small class="form-help">
+                                Google AI Studio → Create API Key で取得
+                            </small>
+                        </div>
+                        <div class="form-group">
+                            <div class="info-box" style="background: #FEF3C7; padding: 12px; border-radius: 8px; border-left: 4px solid #F59E0B;">
+                                <strong style="color: #92400E;">💡 モデルについて</strong>
+                                <p style="color: #78350F; font-size: 0.9rem; margin-top: 6px; margin-bottom: 0;">
+                                    使用モデル: <strong>gemini-2.5-pro</strong>（デフォルト）<br>
+                                    1日100回まで無料で使用できます。通常の使用では問題ありません。
+                                </p>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Chatwork API設定 -->
+                    <div class="api-setting-group">
+                        <div class="api-setting-header">
+                            <h3 class="api-setting-title">💬 Chatwork API設定</h3>
+                            <button type="button" class="btn btn-test-small" id="chatwork-test-btn" data-api="chatwork">
+                                🔍 接続テスト
+                            </button>
+                        </div>
+                        <p class="api-setting-description">
+                            生成した議事録をChatworkに送信するために必要な設定です。<br>
+                            Chatworkにログインして、サービス連携からAPIトークンを取得してください。
+                        </p>
+                        <div class="form-group">
+                            <label for="chatwork-api-token" class="form-label">
+                                <span class="required-mark">必須</span> API Token
+                            </label>
+                            <input 
+                                type="password" 
+                                id="chatwork-api-token" 
+                                name="chatwork_api_token" 
+                                class="form-input" 
+                                placeholder="Chatwork API Tokenを入力"
+                            >
+                            <small class="form-help">
+                                Chatwork → 右上の利用者名 → サービス連携 → APIトークン → 新しいAPIトークンを作成
+                            </small>
+                        </div>
+                        <div class="form-group">
+                            <label for="default-chatwork-room-id" class="form-label">
+                                デフォルトルームID（オプション）
+                                <button type="button" class="btn btn-test-small" id="chatwork-room-test-btn" style="margin-left: 10px; font-size: 0.85em; padding: 4px 8px;">
+                                    🔍 ルームID検証
+                                </button>
+                            </label>
+                            <input 
+                                type="text" 
+                                id="default-chatwork-room-id" 
+                                name="default_chatwork_room_id" 
+                                class="form-input" 
+                                placeholder="例: 12345678"
+                            >
+                            <small class="form-help">
+                                よく使うルームIDを設定しておくと便利です。設定しない場合は、議事録生成時に毎回入力してください。<br>
+                                <strong>取得方法:</strong> ルーム右上の⚙️ → 「グループチャットの設定」→ ルームIDをコピー<br>
+                                または、ルームURLの「rid」の後の数字（例: <code>#!rid12345678</code> → <code>12345678</code>）<br>
+                                <strong>重要:</strong> ルームIDを入力したら「ルームID検証」ボタンで接続を確認してください。
+                            </small>
+                        </div>
+                    </div>
+
+                    <div class="form-actions">
+                        <button type="submit" class="btn btn-primary" id="save-api-settings-btn">
+                            <span class="btn-text">💾 設定を保存</span>
+                        </button>
+                    </div>
+                </form>
+            </section>
+
+            <!-- メインフォームセクション -->
+            <section class="form-section">
+                <h2 class="section-title">🚀 議事録生成</h2>
+                <div style="margin-bottom: 20px;">
+                    <button type="button" class="btn btn-secondary" onclick="loadRecentMeetingsForManual()" style="margin-bottom: 10px;">
+                        📋 最近のミーティングから選択
+                    </button>
+                    <div id="manual-meetings-list" style="display: none; margin-top: 15px; padding: 15px; background: #f9fafb; border-radius: 8px; border: 1px solid #e5e7eb;">
+                        <h4 style="margin-top: 0; margin-bottom: 10px;">最近の録画付きミーティング（期間制限なし）</h4>
+                        <div id="manual-meetings-container"></div>
+                    </div>
+                </div>
+                <form id="process-form" class="process-form">
+                    <div class="form-group">
+                        <label for="meeting-id" class="form-label">
+                            <span class="label-icon">🎥</span>
+                            ZoomミーティングID
+                        </label>
+                        <input 
+                            type="text" 
+                            id="meeting-id" 
+                            name="meeting_id" 
+                            class="form-input" 
+                            placeholder="例: 123456789"
+                            required
+                        >
+                        <small class="form-help">
+                            録画されたZoomミーティングのIDを入力してください<br>
+                            または、上記の「最近のミーティングから選択」ボタンから選択できます
+                        </small>
+                    </div>
+                    
+
+                    <div class="form-group">
+                        <label for="room-id" class="form-label">
+                            <span class="label-icon">💬</span>
+                            ChatworkルームID
+                        </label>
+                        <input 
+                            type="text" 
+                            id="room-id" 
+                            name="room_id" 
+                            class="form-input" 
+                            placeholder="例: 12345678"
+                            required
+                        >
+                        <small class="form-help">
+                            議事録を送信するChatworkのルームIDを入力してください<br>
+                            <strong>ルームIDの確認方法:</strong><br>
+                            • デスクトップ版: ルーム右上の⚙️アイコン → 「グループチャットの設定」→ 下部に表示される「ルームID」<br>
+                            • URLから取得: ルームのURL末尾の数字（例: <code>https://www.chatwork.com/#!rid12345678</code> の場合、<code>12345678</code>）<br>
+                            <span style="color: #ff6b6b;">※ ルームIDは管理者のみ確認可能です</span>
+                        </small>
+                    </div>
+                    
+
+                    <button type="submit" class="btn btn-primary" id="submit-btn">
+                        <span class="btn-text">議事録を生成して送信</span>
+                        <span class="btn-loader" style="display: none;">⏳</span>
+                    </button>
+                </form>
+            </section>
+
+            <!-- 進捗表示セクション -->
+            <section id="progress-section" class="progress-section" style="display: none;">
+                <h2 class="section-title">📊 処理状況</h2>
+                <div class="progress-container">
+                    <div class="progress-bar">
+                        <div id="progress-fill" class="progress-fill" style="width: 0%"></div>
+                    </div>
+                    <p id="progress-message" class="progress-message">処理を開始しています...</p>
+                </div>
+            </section>
+
+            <!-- 結果表示セクション -->
+            <section id="result-section" class="result-section" style="display: none;">
+                <h2 class="section-title">✅ 処理結果</h2>
+                <div id="result-content" class="result-content"></div>
+            </section>
+
+            <!-- 自動処理設定セクション -->
+            <section class="auto-process-section">
+                <h2 class="section-title">⚙️ 自動処理設定</h2>
+                <p class="section-description">
+                    Zoomミーティングが終了したら自動的に議事録を作成してChatworkに送信します
+                </p>
+                
+                <div class="auto-process-controls">
+                    <button class="btn btn-secondary" onclick="loadRecentMeetings()">
+                        📋 最近のミーティングを取得
+                    </button>
+                    <button class="btn btn-secondary" onclick="loadAutoProcessMappings()">
+                        🔄 自動処理設定を更新
+                    </button>
+                </div>
+                
+                <div id="recent-meetings" class="meetings-list" style="display: none;">
+                    <h3>最近の録画付きミーティング（直近7日間）</h3>
+                    <div id="meetings-container"></div>
+                </div>
+                
+                <div id="auto-process-mappings" class="mappings-list">
+                    <h3>自動処理設定一覧</h3>
+                    <div id="mappings-container">
+                        <p class="empty-message">設定がありません。上記の「最近のミーティングを取得」から設定を追加してください。</p>
+                    </div>
+                </div>
+            </section>
+
+            <!-- 使い方セクション -->
+            <section class="help-section">
+                <h2 class="section-title">❓ 使い方</h2>
+                <div class="help-content">
+                    <div class="help-item">
+                        <h3>1. 情報を入力</h3>
+                        <p>ZoomミーティングIDとChatworkルームIDを入力してください。</p>
+                        <p style="margin-top: 8px; font-size: 0.9em; color: #666;">
+                            <strong>ChatworkルームIDの取得方法:</strong><br>
+                            • ルーム右上の⚙️アイコン → 「グループチャットの設定」→ 下部の「ルームID」<br>
+                            • または、ルームのURL末尾の数字（例: <code>#!rid12345678</code> の場合、<code>12345678</code>）
+                        </p>
+                    </div>
+                    <div class="help-item">
+                        <h3>2. 実行</h3>
+                        <p>「議事録を生成して送信」ボタンをクリックすると処理が開始されます。</p>
+                    </div>
+                    <div class="help-item">
+                        <h3>3. 完了</h3>
+                        <p>処理が完了すると、Chatworkに議事録が自動送信されます。</p>
+                    </div>
+                    <div class="help-item">
+                        <h3>4. 自動処理</h3>
+                        <p>「自動処理設定」でミーティングIDとChatworkルームIDを設定すると、Zoomミーティングが終了したら自動的に議事録が生成されてChatworkに送信されます。</p>
+                    </div>
+                </div>
+            </section>
+        </main>
+
+        <footer class="footer">
+            <p>&copy; 2024 Zoom議事録自動生成ツール</p>
+        </footer>
+    </div>
+
+    <script src="/static/js/main.js?v=20250115"></script>
+    <script>
+        // デバッグ用: ページ読み込み確認
+        console.log('HTMLページが読み込まれました');
+        console.log('JavaScriptファイルの読み込みを確認中...');
+        
+        // ボタンの存在確認
+        window.addEventListener('load', function() {
+            console.log('ページの読み込みが完了しました');
+            
+            const zoomBtn = document.getElementById('zoom-test-btn');
+            const geminiBtn = document.getElementById('gemini-test-btn');
+            const chatworkBtn = document.getElementById('chatwork-test-btn');
+            const saveBtn = document.getElementById('save-api-settings-btn');
+            const submitBtn = document.getElementById('submit-btn');
+            
+            console.log('ボタンの存在確認:');
+            console.log('  zoom-test-btn:', zoomBtn ? '存在' : '見つかりません');
+            console.log('  gemini-test-btn:', geminiBtn ? '存在' : '見つかりません');
+            console.log('  chatwork-test-btn:', chatworkBtn ? '存在' : '見つかりません');
+            console.log('  save-api-settings-btn:', saveBtn ? '存在' : '見つかりません');
+            console.log('  submit-btn:', submitBtn ? '存在' : '見つかりません');
+            
+            // イベントリスナーの確認
+            if (zoomBtn) {
+                console.log('zoom-test-btnのイベントリスナー数:', getEventListeners ? getEventListeners(zoomBtn) : '確認不可（Chrome DevToolsが必要）');
+            }
+        });
+    </script>
+</body>
+</html>
+

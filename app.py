@@ -1735,36 +1735,91 @@ async def zoom_webhook(request: Request):
     ミーティング作成イベントと録画完了イベントを受信して自動処理を開始
     """
     global settings
+    
     # 設定が読み込まれていない場合は読み込む
     if settings is None:
-        reload_settings()
+        try:
+            reload_settings()
+        except Exception as e:
+            logger.error(f"設定の読み込みに失敗: {e}", exc_info=True)
     
     try:
-        data = await request.json()
+        # リクエストボディを読み込む（エラーハンドリング付き）
+        try:
+            data = await request.json()
+            if not data:
+                logger.warning("空のリクエストデータを受信しました")
+                return JSONResponse({
+                    "error": "リクエストデータが空です"
+                }, status_code=400)
+        except Exception as json_error:
+            logger.error(f"JSON解析エラー: {json_error}", exc_info=True)
+            # リクエストボディをテキストとして読み込んでログに記録
+            try:
+                body = await request.body()
+                body_text = body.decode('utf-8') if body else "空のリクエストボディ"
+                logger.error(f"リクエストボディ（最初の500文字）: {body_text[:500]}")
+            except Exception as body_error:
+                logger.error(f"リクエストボディの読み込みにも失敗: {body_error}")
+            return JSONResponse({
+                "error": f"JSON解析エラー: {str(json_error)}"
+            }, status_code=400)
+        
         event_type = data.get("event")
+        logger.info(f"Zoom Webhook受信: event_type={event_type}")
         
         # Challenge-responseチェック（Webhook URL検証）
         if event_type == "endpoint.url_validation":
             import hmac
             import hashlib
-            plain_token = data.get("payload", {}).get("plainToken")
-            if plain_token and settings and settings.zoom_api_secret:
-                # encryptedTokenを生成（HMAC-SHA256）
+            
+            logger.info(f"Challenge-response検証を開始: data={data}")
+            
+            # plainTokenの取得（複数の形式に対応）
+            plain_token = None
+            if "payload" in data and isinstance(data["payload"], dict):
+                plain_token = data["payload"].get("plainToken")
+            elif "plainToken" in data:
+                plain_token = data["plainToken"]
+            
+            if not plain_token:
+                logger.error("plainTokenが見つかりませんでした。受信データ: " + str(data)[:500])
+                return JSONResponse({
+                    "error": "plainTokenが見つかりませんでした"
+                }, status_code=400)
+            
+            if not settings:
+                logger.error("設定が読み込まれていません")
+                return JSONResponse({
+                    "error": "設定が読み込まれていません。Vercelダッシュボードで環境変数を設定してください。"
+                }, status_code=500)
+            
+            if not settings.zoom_api_secret:
+                logger.error("ZOOM_API_SECRETが設定されていません")
+                return JSONResponse({
+                    "error": "ZOOM_API_SECRETが設定されていません。Vercelダッシュボードで環境変数を設定してください。"
+                }, status_code=500)
+            
+            # encryptedTokenを生成（HMAC-SHA256）
+            try:
                 encrypted_token = hmac.new(
                     settings.zoom_api_secret.encode('utf-8'),
                     plain_token.encode('utf-8'),
                     hashlib.sha256
                 ).hexdigest()
-                logger.info(f"Challenge-responseチェック: plainToken={plain_token}, encryptedToken={encrypted_token}")
-                return JSONResponse({
+                logger.info(f"Challenge-responseチェック成功: plainToken={plain_token}, encryptedToken={encrypted_token[:20]}...")
+                
+                response_data = {
                     "plainToken": plain_token,
                     "encryptedToken": encrypted_token
-                })
-            else:
-                logger.warning("Challenge-responseチェック: plainTokenまたはAPI Secretが設定されていません")
+                }
+                logger.info(f"Challenge-responseレスポンス: {response_data}")
+                return JSONResponse(response_data)
+            except Exception as hmac_error:
+                logger.error(f"encryptedToken生成エラー: {hmac_error}", exc_info=True)
                 return JSONResponse({
-                    "error": "plainTokenまたはAPI Secretが設定されていません"
-                }, status_code=400)
+                    "error": f"encryptedToken生成エラー: {str(hmac_error)}"
+                }, status_code=500)
         
         # ミーティング作成イベントをチェック
         if event_type == "meeting.created":
@@ -1825,6 +1880,7 @@ async def zoom_webhook(request: Request):
                 })
         
         # その他のイベント
+        logger.info(f"未処理のイベントを受信: {event_type}")
         return JSONResponse({
             "success": True,
             "message": f"イベントを受信: {event_type}"
@@ -1832,6 +1888,8 @@ async def zoom_webhook(request: Request):
         
     except Exception as e:
         logger.error(f"Webhook処理エラー: {e}", exc_info=True)
+        import traceback
+        logger.error(f"トレースバック: {traceback.format_exc()}")
         return JSONResponse({
             "success": False,
             "message": f"エラー: {str(e)}"

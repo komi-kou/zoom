@@ -49,13 +49,26 @@ try:
     templates_dir = project_root / "templates"
     static_dir = project_root / "static"
     
+    # ディレクトリの存在確認
+    if not templates_dir.exists():
+        logger.warning(f"テンプレートディレクトリが存在しません: {templates_dir}")
+    if not static_dir.exists():
+        logger.warning(f"静的ファイルディレクトリが存在しません: {static_dir}")
+    
     templates = Jinja2Templates(directory=str(templates_dir))
     app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
+    logger.info(f"テンプレートと静的ファイルを設定: templates={templates_dir}, static={static_dir}")
 except Exception as e:
     # フォールバック: 相対パスを使用
-    logger.warning(f"絶対パスでの設定に失敗、相対パスを使用: {e}")
-    templates = Jinja2Templates(directory="templates")
-    app.mount("/static", StaticFiles(directory="static"), name="static")
+    logger.warning(f"絶対パスでの設定に失敗、相対パスを使用: {e}", exc_info=True)
+    try:
+        templates = Jinja2Templates(directory="templates")
+        app.mount("/static", StaticFiles(directory="static"), name="static")
+        logger.info("相対パスでテンプレートと静的ファイルを設定しました")
+    except Exception as e2:
+        logger.error(f"テンプレートと静的ファイルの設定に完全に失敗: {e2}", exc_info=True)
+        # エラーが発生してもアプリケーションは起動を続ける
+        templates = None
 
 # 設定の取得（エラーハンドリング付き）
 _settings_loaded = False
@@ -95,8 +108,20 @@ settings = None
 # 処理中のタスクを管理
 processing_tasks = {}
 
-# 自動処理設定
-auto_process_config = AutoProcessConfig()
+# 自動処理設定（遅延初期化 - Vercelでは/tmpディレクトリが存在しない可能性があるため）
+_auto_process_config: Optional[AutoProcessConfig] = None
+
+def get_auto_process_config() -> AutoProcessConfig:
+    """AutoProcessConfigインスタンスを取得（遅延初期化）"""
+    global _auto_process_config
+    if _auto_process_config is None:
+        try:
+            _auto_process_config = AutoProcessConfig()
+        except Exception as e:
+            logger.warning(f"AutoProcessConfigの初期化に失敗（初回起動時は正常）: {e}")
+            # フォールバック: メモリ内のみで動作する設定を作成
+            _auto_process_config = AutoProcessConfig()
+    return _auto_process_config
 
 # スケジューラー（後で初期化）
 scheduler_task: Optional[asyncio.Task] = None
@@ -373,9 +398,7 @@ async def process_meeting_recording_task(
         
         # 手動処理時に処理済みマークを付ける（重複防止）
         try:
-            from scheduler import AutoProcessConfig
-            config = AutoProcessConfig()
-            config.mark_as_processed(meeting_id)
+            get_auto_process_config().mark_as_processed(meeting_id)
             logger.info(f"[タスク {task_id}] 処理済みマークを付けました: ミーティングID={meeting_id}")
         except Exception as mark_error:
             logger.warning(f"[タスク {task_id}] 処理済みマークの付与に失敗: {mark_error}")
@@ -418,10 +441,16 @@ async def process_meeting_recording_task(
 @app.get("/", response_class=HTMLResponse)
 async def index(request: Request):
     """メインページ"""
-    global settings
+    global settings, templates
     # 設定が読み込まれていない場合は読み込む
     if settings is None:
         reload_settings()
+    # テンプレートが設定されていない場合はエラー
+    if templates is None:
+        logger.error("テンプレートが設定されていません")
+        return JSONResponse({
+            "error": "テンプレートが設定されていません"
+        }, status_code=500)
     return templates.TemplateResponse("index.html", {"request": request})
 
 
@@ -1640,7 +1669,7 @@ async def add_auto_process_mapping(
     meeting_topic: Optional[str] = Form(None)
 ):
     """自動処理のマッピングを追加"""
-    auto_process_config.add_mapping(meeting_id, room_id, meeting_topic)
+    get_auto_process_config().add_mapping(meeting_id, room_id, meeting_topic)
     return JSONResponse({
         "success": True,
         "message": "マッピングを追加しました"
@@ -1650,7 +1679,7 @@ async def add_auto_process_mapping(
 @app.delete("/api/auto-process/mapping/{meeting_id}")
 async def remove_auto_process_mapping(meeting_id: str):
     """自動処理のマッピングを削除"""
-    auto_process_config.remove_mapping(meeting_id)
+    get_auto_process_config().remove_mapping(meeting_id)
     return JSONResponse({
         "success": True,
         "message": "マッピングを削除しました"
@@ -1660,7 +1689,7 @@ async def remove_auto_process_mapping(meeting_id: str):
 @app.get("/api/auto-process/mappings")
 async def get_auto_process_mappings():
     """すべての自動処理マッピングを取得"""
-    mappings = auto_process_config.get_all_mappings()
+    mappings = get_auto_process_config().get_all_mappings()
     return JSONResponse({
         "success": True,
         "mappings": mappings
@@ -1716,7 +1745,7 @@ async def zoom_webhook(request: Request):
             
             # デフォルトルームIDがあれば自動処理設定に追加
             if settings and settings.default_chatwork_room_id:
-                auto_process_config.add_mapping(meeting_id, settings.default_chatwork_room_id, meeting_topic)
+                get_auto_process_config().add_mapping(meeting_id, settings.default_chatwork_room_id, meeting_topic)
                 logger.info(f"自動処理設定を追加: ミーティングID={meeting_id}, ルームID={settings.default_chatwork_room_id}")
                 return JSONResponse({
                     "success": True,
@@ -1738,18 +1767,19 @@ async def zoom_webhook(request: Request):
             logger.info(f"録画完了イベントを受信: ミーティングID={meeting_id}")
             
             # 自動処理設定を確認（デフォルトルームIDも考慮）
-            room_id = auto_process_config.get_room_id(meeting_id)
+            config = get_auto_process_config()
+            room_id = config.get_room_id(meeting_id)
             if not room_id and settings and settings.default_chatwork_room_id:
                 room_id = settings.default_chatwork_room_id
                 logger.info(f"デフォルトルームIDを使用: ミーティングID={meeting_id}, ルームID={room_id}")
             
-            if room_id and not auto_process_config.is_processed(meeting_id):
+            if room_id and not config.is_processed(meeting_id):
                 # 自動処理を開始
                 task_id = str(uuid.uuid4())
                 asyncio.create_task(
                     process_meeting_recording_task(task_id, meeting_id, room_id)
                 )
-                auto_process_config.mark_as_processed(meeting_id)
+                config.mark_as_processed(meeting_id)
                 
                 return JSONResponse({
                     "success": True,
@@ -1812,16 +1842,17 @@ async def check_and_process_automatically():
             
             logger.info(f"録画付きミーティング: {len(meetings_with_recordings)}件（全ミーティング: {len(meetings)}件）")
             
+            config = get_auto_process_config()
             for meeting in meetings_with_recordings:
                 meeting_id = str(meeting.get("id"))
                 
                 # 自動処理設定を確認（デフォルトルームIDも考慮）
-                room_id = auto_process_config.get_room_id(meeting_id)
+                room_id = config.get_room_id(meeting_id)
                 if not room_id and settings and settings.default_chatwork_room_id:
                     room_id = settings.default_chatwork_room_id
                     logger.info(f"デフォルトルームIDを使用: ミーティングID={meeting_id}, ルームID={room_id}")
                 
-                if room_id and not auto_process_config.is_processed(meeting_id):
+                if room_id and not config.is_processed(meeting_id):
                     logger.info(f"自動処理を開始: ミーティングID={meeting_id}, ルームID={room_id}")
                     
                     # 処理を開始
@@ -1833,7 +1864,7 @@ async def check_and_process_automatically():
                         
                         # 成功した場合のみ処理済みマークを付ける（改善: 問題点3の修正）
                         if result.get("success"):
-                            auto_process_config.mark_as_processed(meeting_id)
+                            config.mark_as_processed(meeting_id)
                             logger.info(f"✅ 自動処理が完了しました: ミーティングID={meeting_id}")
                         else:
                             logger.error(f"❌ 自動処理が失敗しました: ミーティングID={meeting_id}, エラー: {result.get('error', '不明なエラー')}")
@@ -1870,19 +1901,20 @@ async def check_and_process_automatically():
                 if room_id:
                     # 録画ファイル名をキーとして処理済みかチェック
                     processed_key = f"local_{recording_name}"
+                    config = get_auto_process_config()
                     
-                    if not auto_process_config.is_processed(processed_key):
+                    if not config.is_processed(processed_key):
                         logger.info(f"ローカル録画の自動処理を開始: {recording_name}")
                         
                         # 一時的なミーティングIDとしてファイル名を使用
                         temp_meeting_id = recording_name.replace(".mp4", "").replace(".m4a", "")
                 
-                    # 処理を開始
-                    task_id = str(uuid.uuid4())
-                    asyncio.create_task(
-                        process_meeting_recording_task(task_id, temp_meeting_id, room_id)
-                    )
-                    auto_process_config.mark_as_processed(processed_key)
+                        # 処理を開始
+                        task_id = str(uuid.uuid4())
+                        asyncio.create_task(
+                            process_meeting_recording_task(task_id, temp_meeting_id, room_id)
+                        )
+                        config.mark_as_processed(processed_key)
         except asyncio.TimeoutError:
             logger.warning("ローカル録画の検索がタイムアウトしました")
         except Exception as e:
@@ -1902,8 +1934,9 @@ async def process_new_recording(recording_path: str):
         # ファイル名から処理済みかチェック
         recording_name = Path(recording_path).name
         processed_key = f"local_{recording_name}"
+        config = get_auto_process_config()
         
-        if auto_process_config.is_processed(processed_key):
+        if config.is_processed(processed_key):
             logger.info(f"録画ファイルは既に処理済みです: {recording_name}")
             return
         
@@ -1917,7 +1950,7 @@ async def process_new_recording(recording_path: str):
         asyncio.create_task(
             process_meeting_recording_task(task_id, temp_meeting_id, settings.default_chatwork_room_id)
         )
-        auto_process_config.mark_as_processed(processed_key)
+        config.mark_as_processed(processed_key)
         
         logger.info(f"録画ファイルの自動処理を開始: {recording_name}")
     except Exception as e:

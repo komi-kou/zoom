@@ -22,6 +22,11 @@ class AutoProcessConfig:
         import os
         temp_dir = os.environ.get("TEMP_DIR", "/tmp")
         config_dir = Path(temp_dir)
+        # ディレクトリが存在しない場合は作成
+        try:
+            config_dir.mkdir(parents=True, exist_ok=True)
+        except Exception as e:
+            logger.warning(f"設定ディレクトリの作成に失敗（初回起動時は正常）: {e}")
         self.config_file = config_dir / self.CONFIG_FILE
         self.config: Dict[str, Dict] = {}
         self.load_config()

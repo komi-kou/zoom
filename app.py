@@ -42,8 +42,20 @@ logger = logging.getLogger(__name__)
 app = FastAPI(title="Zoom議事録自動生成ツール")
 
 # テンプレートと静的ファイルの設定
-templates = Jinja2Templates(directory="templates")
-app.mount("/static", StaticFiles(directory="static"), name="static")
+# Vercelでは絶対パスを使用
+try:
+    # プロジェクトルートを取得
+    project_root = Path(__file__).parent.absolute()
+    templates_dir = project_root / "templates"
+    static_dir = project_root / "static"
+    
+    templates = Jinja2Templates(directory=str(templates_dir))
+    app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
+except Exception as e:
+    # フォールバック: 相対パスを使用
+    logger.warning(f"絶対パスでの設定に失敗、相対パスを使用: {e}")
+    templates = Jinja2Templates(directory="templates")
+    app.mount("/static", StaticFiles(directory="static"), name="static")
 
 # 設定の取得（エラーハンドリング付き）
 _settings_loaded = False

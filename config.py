@@ -42,6 +42,8 @@ class Settings(BaseSettings):
     temp_dir: str = Field(default="./temp", env="TEMP_DIR")
     
     class Config:
+        # Vercelなどのサーバーレス環境では環境変数から直接読み込む
+        # .envファイルはローカル開発時のみ使用（存在する場合のみ）
         env_file = ".env"
         env_file_encoding = "utf-8"
         case_sensitive = False
@@ -61,27 +63,27 @@ def get_settings() -> Settings:
     """設定インスタンスを取得"""
     import os
     from pathlib import Path
-    # プロジェクトルートを探す（config.pyがあるディレクトリ）
-    config_dir = Path(__file__).parent.absolute()
-    env_file = config_dir / ".env"
     
-    # 環境変数に.envファイルのパスを設定（os.chdirを使わない方法）
-    # これによりブロッキングを回避
-    original_env_file = os.environ.get("ENV_FILE")
+    # Vercelなどのサーバーレス環境では環境変数から直接読み込む
+    # .envファイルはローカル開発時のみ使用
     try:
+        # まず環境変数から直接読み込む（Vercelではこれが正しい方法）
+        settings = Settings()
+        return settings
+    except Exception as e:
+        # 環境変数から読み込めない場合、.envファイルを試す（ローカル開発用）
+        config_dir = Path(__file__).parent.absolute()
+        env_file = config_dir / ".env"
+        
         if env_file.exists():
-            os.environ["ENV_FILE"] = str(env_file)
-        # 作業ディレクトリを一時的に変更して.envファイルを読み込む
-        original_cwd = os.getcwd()
-        try:
-            os.chdir(config_dir)
-            return Settings()
-        finally:
-            os.chdir(original_cwd)
-    finally:
-        # 環境変数を復元
-        if original_env_file:
-            os.environ["ENV_FILE"] = original_env_file
-        elif "ENV_FILE" in os.environ:
-            del os.environ["ENV_FILE"]
+            # .envファイルが存在する場合のみ、作業ディレクトリを変更して読み込む
+            original_cwd = os.getcwd()
+            try:
+                os.chdir(config_dir)
+                return Settings()
+            finally:
+                os.chdir(original_cwd)
+        else:
+            # .envファイルも存在しない場合はエラーを再発生
+            raise
 

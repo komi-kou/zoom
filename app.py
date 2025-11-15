@@ -17,7 +17,7 @@ from config import get_settings
 from zoom_client import ZoomClient
 from gemini_client import GeminiClient
 from chatwork_client import ChatworkClient
-from scheduler import AutoProcessConfig, Scheduler
+from scheduler import AutoProcessConfig
 # 遅延インポート（ファイルシステムアクセスでブロッキングする可能性があるため）
 # from local_recording_detector import LocalRecordingDetector
 # from recording_watcher import RecordingWatcher
@@ -1919,7 +1919,18 @@ async def startup_event():
     
     # 設定を読み込む（起動時に実行）
     logger.info("設定を読み込み中...")
-    reload_settings()
+    try:
+        reload_settings()
+        
+        # 一時ディレクトリを作成（Vercelでは/tmpを使用）
+        if settings and settings.temp_dir:
+            temp_dir = Path(settings.temp_dir)
+            temp_dir.mkdir(parents=True, exist_ok=True)
+            logger.info(f"一時ディレクトリを作成/確認: {temp_dir}")
+    except Exception as e:
+        logger.error(f"起動時の設定読み込みエラー: {e}", exc_info=True)
+        # エラーが発生してもアプリケーションは起動を続ける（環境変数が設定されていない場合など）
+        # 各エンドポイントで個別にエラーハンドリングを行う
     
     # スケジューラーを停止（Webhook方式のみを使用するため）
     # 1分ごとの自動処理は不要。Webhook（Event Subscriptions）のみで自動化する

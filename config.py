@@ -15,6 +15,8 @@ class Settings(BaseSettings):
     zoom_api_key: str = Field(..., env="ZOOM_API_KEY")
     zoom_api_secret: str = Field(..., env="ZOOM_API_SECRET")
     zoom_account_id: Optional[str] = Field(None, env="ZOOM_ACCOUNT_ID")
+    # Zoom Webhook Secret Token（Challenge-response検証と通常のWebhookイベントの署名検証に使用）
+    zoom_webhook_secret_token: Optional[str] = Field(None, env="ZOOM_WEBHOOK_SECRET_TOKEN")
     
     def __init__(self, **kwargs):
         super().__init__(**kwargs)

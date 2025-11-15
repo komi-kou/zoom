@@ -1738,7 +1738,9 @@ async def zoom_webhook_get():
     config_status = {
         "settings_exists": settings is not None,
         "zoom_api_secret_exists": False,
-        "zoom_api_secret_length": 0
+        "zoom_api_secret_length": 0,
+        "zoom_webhook_secret_token_exists": False,
+        "zoom_webhook_secret_token_length": 0
     }
     
     if settings:
@@ -1746,8 +1748,21 @@ async def zoom_webhook_get():
             config_status["zoom_api_secret_exists"] = bool(settings.zoom_api_secret)
             if settings.zoom_api_secret:
                 config_status["zoom_api_secret_length"] = len(settings.zoom_api_secret)
+            
+            # Secret Tokenの確認
+            if hasattr(settings, 'zoom_webhook_secret_token'):
+                config_status["zoom_webhook_secret_token_exists"] = bool(settings.zoom_webhook_secret_token)
+                if settings.zoom_webhook_secret_token:
+                    config_status["zoom_webhook_secret_token_length"] = len(settings.zoom_webhook_secret_token)
         except Exception as e:
             logger.error(f"設定の確認中にエラー: {e}")
+    
+    # 使用されるSecretの種類を判定
+    secret_type = "未設定"
+    if config_status.get("zoom_webhook_secret_token_exists"):
+        secret_type = "ZOOM_WEBHOOK_SECRET_TOKEN（推奨）"
+    elif config_status.get("zoom_api_secret_exists"):
+        secret_type = "ZOOM_API_SECRET（フォールバック）"
     
     return JSONResponse({
         "status": "ok",
@@ -1755,7 +1770,7 @@ async def zoom_webhook_get():
         "endpoint": "/api/webhook/zoom",
         "method": "POST",
         "config_status": config_status,
-        "note": "Challenge-response検証にはZOOM_API_SECRETが必要です"
+        "note": f"Challenge-response検証にはSecret Tokenが必要です。現在使用中: {secret_type}"
     })
 
 
@@ -1887,11 +1902,45 @@ async def zoom_webhook(request: Request):
             logger.info(f"Challenge-response検証を開始: data={data}")
             
             # plainTokenの取得（複数の形式に対応）
+            # Zoomの公式ドキュメントによると、plainTokenはpayload内に含まれる
             plain_token = None
-            if "payload" in data and isinstance(data["payload"], dict):
-                plain_token = data["payload"].get("plainToken")
-            elif "plainToken" in data:
+            
+            # 形式1: {"event": "endpoint.url_validation", "payload": {"plainToken": "..."}}
+            if "payload" in data:
+                if isinstance(data["payload"], dict):
+                    plain_token = data["payload"].get("plainToken")
+                elif isinstance(data["payload"], str):
+                    # payloadが文字列の場合（JSON文字列の可能性）
+                    try:
+                        import json as json_module
+                        payload_dict = json_module.loads(data["payload"])
+                        plain_token = payload_dict.get("plainToken")
+                    except:
+                        pass
+            
+            # 形式2: {"event": "endpoint.url_validation", "plainToken": "..."}
+            if not plain_token and "plainToken" in data:
                 plain_token = data["plainToken"]
+            
+            # 形式3: ルートレベルにplainTokenがある場合
+            if not plain_token:
+                # データ全体を再帰的に検索
+                def find_plain_token(obj):
+                    if isinstance(obj, dict):
+                        if "plainToken" in obj:
+                            return obj["plainToken"]
+                        for value in obj.values():
+                            result = find_plain_token(value)
+                            if result:
+                                return result
+                    elif isinstance(obj, list):
+                        for item in obj:
+                            result = find_plain_token(item)
+                            if result:
+                                return result
+                    return None
+                
+                plain_token = find_plain_token(data)
             
             if not plain_token:
                 logger.error("plainTokenが見つかりませんでした。受信データ: " + str(data)[:500])
@@ -1905,16 +1954,29 @@ async def zoom_webhook(request: Request):
                     "error": "設定が読み込まれていません。Vercelダッシュボードで環境変数を設定してください。"
                 }, status_code=500)
             
-            if not settings.zoom_api_secret:
-                logger.error("ZOOM_API_SECRETが設定されていません")
+            # Challenge-response検証には、Secret Tokenを使用（公式ドキュメントに基づく）
+            # 注意: Client Secretは使用しない（Secret Tokenが必要）
+            secret_for_validation = None
+            
+            # 優先順位: ZOOM_WEBHOOK_SECRET_TOKEN（Secret Token）を優先的に使用
+            if settings.zoom_webhook_secret_token:
+                secret_for_validation = settings.zoom_webhook_secret_token
+                logger.info(f"ZOOM_WEBHOOK_SECRET_TOKENを使用してChallenge-response検証を実行（長さ: {len(secret_for_validation)}）")
+            elif settings.zoom_api_secret:
+                # フォールバック: Secret Tokenが設定されていない場合のみClient Secretを使用
+                secret_for_validation = settings.zoom_api_secret
+                logger.warning("ZOOM_WEBHOOK_SECRET_TOKENが設定されていません。ZOOM_API_SECRETを使用します（推奨されません）")
+                logger.info(f"ZOOM_API_SECRETを使用してChallenge-response検証を実行（長さ: {len(secret_for_validation)}）")
+            else:
+                logger.error("ZOOM_WEBHOOK_SECRET_TOKENまたはZOOM_API_SECRETが設定されていません")
                 return JSONResponse({
-                    "error": "ZOOM_API_SECRETが設定されていません。Vercelダッシュボードで環境変数を設定してください。"
+                    "error": "ZOOM_WEBHOOK_SECRET_TOKEN（Secret Token）が設定されていません。Zoom App Marketplaceの「Feature」セクションでSecret Tokenを取得し、Vercelダッシュボードで環境変数ZOOM_WEBHOOK_SECRET_TOKENとして設定してください。"
                 }, status_code=500)
             
             # encryptedTokenを生成（HMAC-SHA256）
             try:
                 encrypted_token = hmac.new(
-                    settings.zoom_api_secret.encode('utf-8'),
+                    secret_for_validation.encode('utf-8'),
                     plain_token.encode('utf-8'),
                     hashlib.sha256
                 ).hexdigest()
@@ -1925,7 +1987,12 @@ async def zoom_webhook(request: Request):
                     "encryptedToken": encrypted_token
                 }
                 logger.info(f"Challenge-responseレスポンス: {response_data}")
-                return JSONResponse(response_data)
+                
+                # レスポンスを返す（Content-Typeを明示的に設定）
+                response = JSONResponse(response_data)
+                response.headers["Content-Type"] = "application/json"
+                logger.info(f"Challenge-response検証成功: plainToken={plain_token}, encryptedToken長={len(encrypted_token)}")
+                return response
             except Exception as hmac_error:
                 logger.error(f"encryptedToken生成エラー: {hmac_error}", exc_info=True)
                 return JSONResponse({

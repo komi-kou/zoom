@@ -1,10 +1,9 @@
 """
-スケジューラーモジュール
-定期的にZoom録画をチェックして自動処理を行う
+自動処理設定管理モジュール
+ミーティングIDとChatworkルームIDのマッピング、処理済み状態を管理
+（Webhook方式で使用）
 """
-import asyncio
 import json
-import os
 from datetime import datetime
 from typing import Dict, List, Optional
 from pathlib import Path
@@ -98,43 +97,5 @@ class AutoProcessConfig:
         ]
 
 
-class Scheduler:
-    """スケジューラー"""
-    
-    def __init__(self, process_callback, check_interval: int = 300):
-        """
-        スケジューラーを初期化
-        
-        Args:
-            process_callback: 処理を実行するコールバック関数
-            check_interval: チェック間隔（秒）
-        """
-        self.process_callback = process_callback
-        self.check_interval = check_interval
-        self.running = False
-        self.config = AutoProcessConfig()
-    
-    async def start(self):
-        """スケジューラーを開始"""
-        self.running = True
-        logger.info(f"スケジューラーを開始しました（チェック間隔: {self.check_interval}秒）")
-        
-        while self.running:
-            try:
-                await self.check_and_process()
-            except Exception as e:
-                logger.error(f"スケジューラーのエラー: {e}", exc_info=True)
-            
-            await asyncio.sleep(self.check_interval)
-    
-    def stop(self):
-        """スケジューラーを停止"""
-        self.running = False
-        logger.info("スケジューラーを停止しました")
-    
-    async def check_and_process(self):
-        """録画をチェックして処理"""
-        logger.info("録画をチェック中...")
-        if self.process_callback:
-            await self.process_callback()
+# Schedulerクラスは削除しました（Webhook方式のみを使用するため不要）
 

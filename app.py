@@ -358,6 +358,16 @@ async def process_meeting_recording_task(
             )
         
         logger.info(f"[タスク {task_id}] Chatworkへの送信が完了しました")
+        
+        # 手動処理時に処理済みマークを付ける（重複防止）
+        try:
+            from scheduler import AutoProcessConfig
+            config = AutoProcessConfig()
+            config.mark_as_processed(meeting_id)
+            logger.info(f"[タスク {task_id}] 処理済みマークを付けました: ミーティングID={meeting_id}")
+        except Exception as mark_error:
+            logger.warning(f"[タスク {task_id}] 処理済みマークの付与に失敗: {mark_error}")
+        
         processing_tasks[task_id]["progress"] = 100
         processing_tasks[task_id]["status"] = "completed"
         processing_tasks[task_id]["message"] = "処理が完了しました！議事録をChatworkに送信しました。"
@@ -1660,6 +1670,29 @@ async def zoom_webhook(request: Request):
         data = await request.json()
         event_type = data.get("event")
         
+        # Challenge-responseチェック（Webhook URL検証）
+        if event_type == "endpoint.url_validation":
+            import hmac
+            import hashlib
+            plain_token = data.get("payload", {}).get("plainToken")
+            if plain_token and settings and settings.zoom_api_secret:
+                # encryptedTokenを生成（HMAC-SHA256）
+                encrypted_token = hmac.new(
+                    settings.zoom_api_secret.encode('utf-8'),
+                    plain_token.encode('utf-8'),
+                    hashlib.sha256
+                ).hexdigest()
+                logger.info(f"Challenge-responseチェック: plainToken={plain_token}, encryptedToken={encrypted_token}")
+                return JSONResponse({
+                    "plainToken": plain_token,
+                    "encryptedToken": encrypted_token
+                })
+            else:
+                logger.warning("Challenge-responseチェック: plainTokenまたはAPI Secretが設定されていません")
+                return JSONResponse({
+                    "error": "plainTokenまたはAPI Secretが設定されていません"
+                }, status_code=400)
+        
         # ミーティング作成イベントをチェック
         if event_type == "meeting.created":
             payload = data.get("payload", {})
@@ -1888,46 +1921,52 @@ async def startup_event():
     logger.info("設定を読み込み中...")
     reload_settings()
     
-    # スケジューラーを開始（1分ごとにチェック - より頻繁にチェック）
-    scheduler = Scheduler(check_and_process_automatically, check_interval=60)
-    scheduler_task = asyncio.create_task(scheduler.start())
-    logger.info("スケジューラーを開始しました")
+    # スケジューラーを停止（Webhook方式のみを使用するため）
+    # 1分ごとの自動処理は不要。Webhook（Event Subscriptions）のみで自動化する
+    logger.info("スケジューラーは停止しています（Webhook方式のみを使用）")
+    scheduler_task = None
     
-    # 録画ファイルの監視を開始（リアルタイム検知）
-    if settings and settings.default_chatwork_room_id:
-        try:
-            # 遅延インポート（ファイルシステムアクセスでブロッキングする可能性があるため）
-            from local_recording_detector import LocalRecordingDetector
-            from recording_watcher import RecordingWatcher
-            detector = LocalRecordingDetector()
-            recording_dir = detector.get_recording_directory()
-            
-            if recording_dir:
-                # コールバック関数を定義
-                def on_recording_detected(file_path: str):
-                    """録画ファイル検出時のコールバック"""
-                    asyncio.create_task(process_new_recording(file_path))
-                
-                # 監視を開始
-                try:
-                    recording_watcher = RecordingWatcher(
-                        recording_directory=recording_dir,
-                        callback=on_recording_detected,
-                        min_size_mb=1.0
-                    )
-                    recording_watcher.start()
-                    if recording_watcher.is_alive():
-                        logger.info(f"録画ファイルのリアルタイム監視を開始しました: {recording_dir}")
-                    else:
-                        logger.info(f"録画ファイルの監視はポーリング方式（1分ごと）で動作します: {recording_dir}")
-                except Exception as e:
-                    logger.warning(f"録画ファイル監視の開始に失敗: {e}")
-            else:
-                logger.warning("録画保存先が見つかりませんでした。監視を開始できません。")
-        except Exception as e:
-            logger.error(f"録画ファイル監視の初期化に失敗: {e}", exc_info=True)
-    else:
-        logger.info("デフォルトルームIDが設定されていないため、録画ファイルの監視をスキップします")
+    # 録画ファイルの監視を停止（Webhook方式のみを使用するため）
+    # ローカル録画の監視は不要。Webhook（Event Subscriptions）のみで自動化する
+    logger.info("録画ファイル監視は停止しています（Webhook方式のみを使用）")
+    recording_watcher = None
+    
+    # 以下のコードはコメントアウト（Webhook方式のみを使用するため）
+    # 録画ファイルの監視は不要。Webhook（Event Subscriptions）のみで自動化する
+    # if settings and settings.default_chatwork_room_id:
+    #     try:
+    #         # 遅延インポート（ファイルシステムアクセスでブロッキングする可能性があるため）
+    #         from local_recording_detector import LocalRecordingDetector
+    #         from recording_watcher import RecordingWatcher
+    #         detector = LocalRecordingDetector()
+    #         recording_dir = detector.get_recording_directory()
+    #         
+    #         if recording_dir:
+    #             # コールバック関数を定義
+    #             def on_recording_detected(file_path: str):
+    #                 """録画ファイル検出時のコールバック"""
+    #                 asyncio.create_task(process_new_recording(file_path))
+    #             
+    #             # 監視を開始
+    #             try:
+    #                 recording_watcher = RecordingWatcher(
+    #                     recording_directory=recording_dir,
+    #                     callback=on_recording_detected,
+    #                     min_size_mb=1.0
+    #                 )
+    #                 recording_watcher.start()
+    #                 if recording_watcher.is_alive():
+    #                     logger.info(f"録画ファイルのリアルタイム監視を開始しました: {recording_dir}")
+    #                 else:
+    #                     logger.info(f"録画ファイルの監視はポーリング方式（1分ごと）で動作します: {recording_dir}")
+    #             except Exception as e:
+    #                 logger.warning(f"録画ファイル監視の開始に失敗: {e}")
+    #         else:
+    #             logger.warning("録画保存先が見つかりませんでした。監視を開始できません。")
+    #     except Exception as e:
+    #         logger.error(f"録画ファイル監視の初期化に失敗: {e}", exc_info=True)
+    # else:
+    #     logger.info("デフォルトルームIDが設定されていないため、録画ファイルの監視をスキップします")
 
 
 @app.on_event("shutdown")

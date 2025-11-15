@@ -5,6 +5,7 @@ FastAPIを使用したWeb UI
 import os
 import uuid
 import asyncio
+import json
 from pathlib import Path
 from typing import Optional
 from fastapi import FastAPI, Request, Form, HTTPException
@@ -1728,6 +1729,17 @@ async def get_auto_process_mappings():
     })
 
 
+@app.get("/api/webhook/zoom")
+async def zoom_webhook_get():
+    """Webhookエンドポイントの動作確認用（GET）"""
+    return JSONResponse({
+        "status": "ok",
+        "message": "Zoom Webhookエンドポイントは正常に動作しています",
+        "endpoint": "/api/webhook/zoom",
+        "method": "POST"
+    })
+
+
 @app.post("/api/webhook/zoom")
 async def zoom_webhook(request: Request):
     """
@@ -1736,12 +1748,28 @@ async def zoom_webhook(request: Request):
     """
     global settings
     
+    # リクエスト情報をログに記録（デバッグ用）
+    logger.info(f"Webhookリクエスト受信: method={request.method}, url={request.url}")
+    logger.info(f"リクエストヘッダー: {dict(request.headers)}")
+    
     # 設定が読み込まれていない場合は読み込む
     if settings is None:
         try:
             reload_settings()
+            logger.info("設定を再読み込みしました")
         except Exception as e:
             logger.error(f"設定の読み込みに失敗: {e}", exc_info=True)
+            import traceback
+            logger.error(f"トレースバック: {traceback.format_exc()}")
+    
+    # 設定の状態をログに記録
+    if settings:
+        logger.info(f"設定読み込み状態: zoom_api_key存在={hasattr(settings, 'zoom_api_key')}, zoom_api_secret存在={hasattr(settings, 'zoom_api_secret')}")
+        logger.info(f"zoom_api_secret設定状態: {bool(settings.zoom_api_secret)}")
+        if settings.zoom_api_secret:
+            logger.info(f"zoom_api_secret長: {len(settings.zoom_api_secret)}")
+    else:
+        logger.error("settingsがNoneです")
     
     try:
         # リクエストボディを読み込む（エラーハンドリング付き）
@@ -1752,6 +1780,7 @@ async def zoom_webhook(request: Request):
                 return JSONResponse({
                     "error": "リクエストデータが空です"
                 }, status_code=400)
+            logger.info(f"受信データ: {json.dumps(data, ensure_ascii=False)[:500]}")
         except Exception as json_error:
             logger.error(f"JSON解析エラー: {json_error}", exc_info=True)
             # リクエストボディをテキストとして読み込んでログに記録

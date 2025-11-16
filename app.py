@@ -1779,15 +1779,31 @@ async def zoom_webhook_test(request: Request):
     """Challenge-response検証のテスト用エンドポイント"""
     global settings
     
+    # リクエストヘッダーとボディをログ出力
+    logger.info(f"TEST Webhookリクエスト受信: headers={dict(request.headers)}")
+    
     try:
-        # テスト用のリクエストデータ
-        test_data = {
-            "event": "endpoint.url_validation",
-            "payload": {
-                "plainToken": "test_token_for_validation"
-            }
-        }
+        body = await request.body()
+        body_str = body.decode('utf-8') if body else ""
+        logger.info(f"TEST リクエストボディ（生データ）: {body_str[:1000]}")
         
+        # JSONとしてパース
+        data = await request.json() if body else {}
+        logger.info(f"TEST パース済みデータ: {data}")
+    except Exception as e:
+        logger.error(f"TEST リクエスト解析エラー: {e}")
+        data = {}
+    
+    # 通常のWebhookエンドポイントと同じ処理を実行
+    return await zoom_webhook(request)
+
+
+@app.get("/api/webhook/zoom/validate")
+async def zoom_webhook_validate():
+    """Challenge-response検証の手動テスト用エンドポイント"""
+    global settings
+    
+    try:
         # 設定の状態を確認
         if not settings:
             try:
@@ -1798,35 +1814,76 @@ async def zoom_webhook_test(request: Request):
                     "error": f"設定の読み込みに失敗: {str(e)}"
                 }, status_code=500)
         
-        if not settings or not settings.zoom_api_secret:
-            return JSONResponse({
-                "success": False,
-                "error": "ZOOM_API_SECRETが設定されていません",
-                "config_status": {
-                    "settings_exists": settings is not None,
-                    "zoom_api_secret_exists": False
-                }
-            }, status_code=500)
+        # 利用可能なシークレットを確認
+        config_status = {
+            "zoom_webhook_secret_token_exists": bool(settings.zoom_webhook_secret_token) if settings else False,
+            "zoom_api_secret_exists": bool(settings.zoom_api_secret) if settings else False,
+            "zoom_webhook_secret_token_length": len(settings.zoom_webhook_secret_token) if settings and settings.zoom_webhook_secret_token else 0,
+            "zoom_api_secret_length": len(settings.zoom_api_secret) if settings and settings.zoom_api_secret else 0
+        }
         
-        # Challenge-response検証を実行
+        # テスト用のリクエストデータ
+        test_data = {
+            "event": "endpoint.url_validation",
+            "payload": {
+                "plainToken": "test_token_for_validation"
+            }
+        }
+        
+        # Challenge-response検証を実行（本番と同じロジック）
         import hmac
         import hashlib
         
         plain_token = test_data["payload"]["plainToken"]
-        encrypted_token = hmac.new(
-            settings.zoom_api_secret.encode('utf-8'),
-            plain_token.encode('utf-8'),
-            hashlib.sha256
-        ).hexdigest()
+        test_results = []
+        
+        # ZOOM_WEBHOOK_SECRET_TOKENでテスト
+        if settings.zoom_webhook_secret_token:
+            encrypted_token_webhook = hmac.new(
+                settings.zoom_webhook_secret_token.encode('utf-8'),
+                plain_token.encode('utf-8'),
+                hashlib.sha256
+            ).hexdigest()
+            test_results.append({
+                "secret_type": "ZOOM_WEBHOOK_SECRET_TOKEN",
+                "plainToken": plain_token,
+                "encryptedToken": encrypted_token_webhook,
+                "status": "利用可能（推奨）"
+            })
+        
+        # ZOOM_API_SECRETでテスト
+        if settings.zoom_api_secret:
+            encrypted_token_api = hmac.new(
+                settings.zoom_api_secret.encode('utf-8'),
+                plain_token.encode('utf-8'),
+                hashlib.sha256
+            ).hexdigest()
+            test_results.append({
+                "secret_type": "ZOOM_API_SECRET",
+                "plainToken": plain_token,
+                "encryptedToken": encrypted_token_api,
+                "status": "利用可能（フォールバック）"
+            })
+        
+        # 実際に使用されるシークレット
+        active_secret = "ZOOM_WEBHOOK_SECRET_TOKEN" if settings.zoom_webhook_secret_token else "ZOOM_API_SECRET"
+        
+        if not test_results:
+            return JSONResponse({
+                "success": False,
+                "error": "シークレットが設定されていません",
+                "config_status": config_status,
+                "recommendation": "Zoom App MarketplaceでSecret Tokenを生成し、環境変数ZOOM_WEBHOOK_SECRET_TOKENに設定してください"
+            }, status_code=500)
         
         return JSONResponse({
             "success": True,
-            "message": "Challenge-response検証が正常に動作しています",
-            "test_result": {
-                "plainToken": plain_token,
-                "encryptedToken": encrypted_token,
-                "zoom_api_secret_length": len(settings.zoom_api_secret)
-            }
+            "message": "Challenge-response検証の準備ができています",
+            "active_secret": active_secret,
+            "config_status": config_status,
+            "test_results": test_results,
+            "endpoint_url": "https://zoom-black.vercel.app/api/webhook/zoom",
+            "recommendation": "ZOOM_WEBHOOK_SECRET_TOKENが未設定の場合は、Zoom App Marketplaceで生成して設定することを推奨します"
         })
         
     except Exception as e:
@@ -1899,104 +1956,63 @@ async def zoom_webhook(request: Request):
             import hmac
             import hashlib
             
-            logger.info(f"Challenge-response検証を開始: data={data}")
+            logger.info(f"Challenge-response検証を開始")
             
-            # plainTokenの取得（複数の形式に対応）
-            # Zoomの公式ドキュメントによると、plainTokenはpayload内に含まれる
+            # plainTokenの取得 - Zoom公式ドキュメントに基づく
             plain_token = None
             
-            # 形式1: {"event": "endpoint.url_validation", "payload": {"plainToken": "..."}}
-            if "payload" in data:
-                if isinstance(data["payload"], dict):
-                    plain_token = data["payload"].get("plainToken")
-                elif isinstance(data["payload"], str):
-                    # payloadが文字列の場合（JSON文字列の可能性）
-                    try:
-                        import json as json_module
-                        payload_dict = json_module.loads(data["payload"])
-                        plain_token = payload_dict.get("plainToken")
-                    except:
-                        pass
-            
-            # 形式2: {"event": "endpoint.url_validation", "plainToken": "..."}
-            if not plain_token and "plainToken" in data:
-                plain_token = data["plainToken"]
-            
-            # 形式3: ルートレベルにplainTokenがある場合
-            if not plain_token:
-                # データ全体を再帰的に検索
-                def find_plain_token(obj):
-                    if isinstance(obj, dict):
-                        if "plainToken" in obj:
-                            return obj["plainToken"]
-                        for value in obj.values():
-                            result = find_plain_token(value)
-                            if result:
-                                return result
-                    elif isinstance(obj, list):
-                        for item in obj:
-                            result = find_plain_token(item)
-                            if result:
-                                return result
-                    return None
-                
-                plain_token = find_plain_token(data)
+            # 標準形式: {"event": "endpoint.url_validation", "payload": {"plainToken": "..."}}
+            if "payload" in data and isinstance(data["payload"], dict):
+                plain_token = data["payload"].get("plainToken")
             
             if not plain_token:
-                logger.error("plainTokenが見つかりませんでした。受信データ: " + str(data)[:500])
+                logger.error(f"plainTokenが見つかりませんでした。受信データ構造: {list(data.keys())}")
+                if "payload" in data:
+                    logger.error(f"payload内容: {data['payload']}")
                 return JSONResponse({
-                    "error": "plainTokenが見つかりませんでした"
+                    "message": "plainToken not found",
+                    "success": False
                 }, status_code=400)
             
-            if not settings:
-                logger.error("設定が読み込まれていません")
+            # Secret Tokenを取得（環境変数から）
+            secret_token = settings.zoom_webhook_secret_token if settings else None
+            
+            if not secret_token:
+                logger.error("ZOOM_WEBHOOK_SECRET_TOKENが設定されていません")
+                # フォールバックは使用しない - Zoom Marketplaceは専用のSecret Tokenを要求
                 return JSONResponse({
-                    "error": "設定が読み込まれていません。Vercelダッシュボードで環境変数を設定してください。"
+                    "message": "Webhook secret token not configured",
+                    "success": False
                 }, status_code=500)
             
-            # Challenge-response検証には、Secret Tokenを使用（公式ドキュメントに基づく）
-            # 注意: Client Secretは使用しない（Secret Tokenが必要）
-            secret_for_validation = None
-            
-            # 優先順位: ZOOM_WEBHOOK_SECRET_TOKEN（Secret Token）を優先的に使用
-            if settings.zoom_webhook_secret_token:
-                secret_for_validation = settings.zoom_webhook_secret_token
-                logger.info(f"ZOOM_WEBHOOK_SECRET_TOKENを使用してChallenge-response検証を実行（長さ: {len(secret_for_validation)}）")
-            elif settings.zoom_api_secret:
-                # フォールバック: Secret Tokenが設定されていない場合のみClient Secretを使用
-                secret_for_validation = settings.zoom_api_secret
-                logger.warning("ZOOM_WEBHOOK_SECRET_TOKENが設定されていません。ZOOM_API_SECRETを使用します（推奨されません）")
-                logger.info(f"ZOOM_API_SECRETを使用してChallenge-response検証を実行（長さ: {len(secret_for_validation)}）")
-            else:
-                logger.error("ZOOM_WEBHOOK_SECRET_TOKENまたはZOOM_API_SECRETが設定されていません")
-                return JSONResponse({
-                    "error": "ZOOM_WEBHOOK_SECRET_TOKEN（Secret Token）が設定されていません。Zoom App Marketplaceの「Feature」セクションでSecret Tokenを取得し、Vercelダッシュボードで環境変数ZOOM_WEBHOOK_SECRET_TOKENとして設定してください。"
-                }, status_code=500)
-            
-            # encryptedTokenを生成（HMAC-SHA256）
+            # HMAC SHA-256でencryptedTokenを生成
             try:
+                # シンプルに直接計算
                 encrypted_token = hmac.new(
-                    secret_for_validation.encode('utf-8'),
+                    secret_token.encode('utf-8'),
                     plain_token.encode('utf-8'),
                     hashlib.sha256
                 ).hexdigest()
-                logger.info(f"Challenge-responseチェック成功: plainToken={plain_token}, encryptedToken={encrypted_token[:20]}...")
                 
+                logger.info(f"検証トークン生成完了: plainToken={plain_token[:10]}..., encryptedToken={encrypted_token[:10]}...")
+                
+                # Zoom公式ドキュメントに準拠した最小限のレスポンス
                 response_data = {
                     "plainToken": plain_token,
                     "encryptedToken": encrypted_token
                 }
-                logger.info(f"Challenge-responseレスポンス: {response_data}")
                 
-                # レスポンスを返す（Content-Typeを明示的に設定）
-                response = JSONResponse(response_data)
-                response.headers["Content-Type"] = "application/json"
-                logger.info(f"Challenge-response検証成功: plainToken={plain_token}, encryptedToken長={len(encrypted_token)}")
-                return response
-            except Exception as hmac_error:
-                logger.error(f"encryptedToken生成エラー: {hmac_error}", exc_info=True)
+                # シンプルなJSONレスポンスを返す（3秒以内）
+                return JSONResponse(
+                    content=response_data,
+                    status_code=200
+                )
+                
+            except Exception as e:
+                logger.error(f"トークン生成エラー: {str(e)}")
                 return JSONResponse({
-                    "error": f"encryptedToken生成エラー: {str(hmac_error)}"
+                    "message": "Token generation failed",
+                    "success": False
                 }, status_code=500)
         
         # ミーティング作成イベントをチェック
@@ -2012,12 +2028,66 @@ async def zoom_webhook(request: Request):
             if settings and settings.default_chatwork_room_id:
                 get_auto_process_config().add_mapping(meeting_id, settings.default_chatwork_room_id, meeting_topic)
                 logger.info(f"自動処理設定を追加: ミーティングID={meeting_id}, ルームID={settings.default_chatwork_room_id}")
+                
+                # Chatworkに通知
+                try:
+                    from chatwork_client import ChatworkClient
+                    chatwork = ChatworkClient(settings.chatwork_api_token)
+                    message = f"[info][title]Zoomミーティング作成通知[/title]"
+                    message += f"ミーティングID: {meeting_id}\n"
+                    message += f"トピック: {meeting_topic}\n"
+                    message += f"録画完了後、自動的に議事録を作成します。[/info]"
+                    await chatwork.send_message_async(settings.default_chatwork_room_id, message)
+                except Exception as e:
+                    logger.error(f"Chatwork通知エラー: {e}")
+                
                 return JSONResponse({
                     "success": True,
-                    "message": f"自動処理設定を追加しました: ミーティングID={meeting_id}, ルームID={settings.default_chatwork_room_id}"
+                    "message": f"自動処理設定を追加しました: ミーティングID={meeting_id}"
                 })
             else:
-                logger.info(f"デフォルトルームIDが設定されていないため、自動処理設定を追加しませんでした: ミーティングID={meeting_id}")
+                logger.info(f"デフォルトルームIDが設定されていないため、自動処理設定を追加しませんでした")
+                return JSONResponse({
+                    "success": True,
+                    "message": "デフォルトルームIDが設定されていません"
+                })
+        
+        # ミーティング開始イベントをチェック
+        if event_type == "meeting.started":
+            payload = data.get("payload", {})
+            object_data = payload.get("object", {})
+            meeting_id = str(object_data.get("id"))
+            meeting_topic = object_data.get("topic", f"ミーティング {meeting_id}")
+            host_email = object_data.get("host_email", "不明")
+            
+            logger.info(f"ミーティング開始を検知: ミーティングID={meeting_id}, トピック={meeting_topic}")
+            
+            # デフォルトルームIDがあれば自動処理設定に追加
+            if settings and settings.default_chatwork_room_id:
+                # 既に設定がない場合のみ追加
+                config = get_auto_process_config()
+                if not config.get_room_id(meeting_id):
+                    config.add_mapping(meeting_id, settings.default_chatwork_room_id, meeting_topic)
+                    logger.info(f"自動処理設定を追加: ミーティングID={meeting_id}")
+                
+                # Chatworkに通知
+                try:
+                    from chatwork_client import ChatworkClient
+                    chatwork = ChatworkClient(settings.chatwork_api_token)
+                    message = f"[info][title]Zoomミーティング開始[/title]"
+                    message += f"ミーティングID: {meeting_id}\n"
+                    message += f"トピック: {meeting_topic}\n"
+                    message += f"ホスト: {host_email}\n"
+                    message += f"録画完了後、自動的に議事録を作成します。[/info]"
+                    await chatwork.send_message_async(settings.default_chatwork_room_id, message)
+                except Exception as e:
+                    logger.error(f"Chatwork通知エラー: {e}")
+                
+                return JSONResponse({
+                    "success": True,
+                    "message": f"ミーティング開始を記録しました: {meeting_id}"
+                })
+            else:
                 return JSONResponse({
                     "success": True,
                     "message": "デフォルトルームIDが設定されていません"
@@ -2028,18 +2098,46 @@ async def zoom_webhook(request: Request):
             payload = data.get("payload", {})
             object_data = payload.get("object", {})
             meeting_id = str(object_data.get("id"))
+            meeting_topic = object_data.get("topic", f"ミーティング {meeting_id}")
+            recording_files = object_data.get("recording_files", [])
             
-            logger.info(f"録画完了イベントを受信: ミーティングID={meeting_id}")
+            logger.info(f"録画完了イベントを受信: ミーティングID={meeting_id}, ファイル数={len(recording_files)}")
             
             # 自動処理設定を確認（デフォルトルームIDも考慮）
             config = get_auto_process_config()
             room_id = config.get_room_id(meeting_id)
             if not room_id and settings and settings.default_chatwork_room_id:
                 room_id = settings.default_chatwork_room_id
+                # 設定に追加
+                config.add_mapping(meeting_id, room_id, meeting_topic)
                 logger.info(f"デフォルトルームIDを使用: ミーティングID={meeting_id}, ルームID={room_id}")
             
-            if room_id and not config.is_processed(meeting_id):
+            if room_id:
+                # 既に処理済みかチェック
+                if config.is_processed(meeting_id):
+                    logger.info(f"既に処理済み: ミーティングID={meeting_id}")
+                    return JSONResponse({
+                        "success": True,
+                        "message": f"既に処理済みです: ミーティングID={meeting_id}"
+                    })
+                
                 # 自動処理を開始
+                logger.info(f"録画の自動処理を開始: ミーティングID={meeting_id}")
+                
+                # Chatworkに通知
+                try:
+                    from chatwork_client import ChatworkClient
+                    chatwork = ChatworkClient(settings.chatwork_api_token)
+                    message = f"[info][title]Zoom録画完了 - 議事録作成開始[/title]"
+                    message += f"ミーティングID: {meeting_id}\n"
+                    message += f"トピック: {meeting_topic}\n"
+                    message += f"録画ファイル数: {len(recording_files)}\n"
+                    message += f"議事録を自動作成中です...[/info]"
+                    await chatwork.send_message_async(room_id, message)
+                except Exception as e:
+                    logger.error(f"Chatwork通知エラー: {e}")
+                
+                # 非同期で処理タスクを開始
                 task_id = str(uuid.uuid4())
                 asyncio.create_task(
                     process_meeting_recording_task(task_id, meeting_id, room_id)
@@ -2048,13 +2146,13 @@ async def zoom_webhook(request: Request):
                 
                 return JSONResponse({
                     "success": True,
-                    "message": f"自動処理を開始しました: ミーティングID={meeting_id}"
+                    "message": f"録画の議事録作成を開始しました: ミーティングID={meeting_id}"
                 })
             else:
-                logger.info(f"自動処理設定がないか、既に処理済み: ミーティングID={meeting_id}")
+                logger.warning(f"自動処理設定がありません: ミーティングID={meeting_id}")
                 return JSONResponse({
                     "success": True,
-                    "message": "自動処理設定がありません"
+                    "message": f"ルームIDが設定されていません: ミーティングID={meeting_id}"
                 })
         
         # その他のイベント
